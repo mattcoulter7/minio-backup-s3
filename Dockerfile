@@ -3,7 +3,6 @@ FROM alpine:3.22 AS build
 WORKDIR /src
 RUN apk add --no-cache go
 COPY main.go .
-# minimal module just to pull robfig/cron
 RUN go mod init local/cron \
  && go get github.com/robfig/cron/v3 \
  && go build -o /out/go-cron main.go
@@ -18,26 +17,21 @@ RUN apk add --no-cache bash curl ca-certificates tzdata \
 COPY --from=build /out/go-cron /usr/local/bin/go-cron
 
 # Env defaults (override at runtime)
-ENV MINIO_URL=""
-ENV MINIO_ACCESS_KEY=""
-ENV MINIO_SECRET_KEY=""
-
-ENV AWS_ACCESS_KEY_ID=""
-ENV AWS_SECRET_ACCESS_KEY=""
-ENV AWS_REGION="ap-southeast-2"
-ENV AWS_S3_ENDPOINT=""
-
-ENV DEST_BUCKET=""
-ENV DEST_PREFIX=""
-ENV BUCKETS=""
-
-ENV REMOVE="yes"
-ENV DRY_RUN="no"
-ENV MC_INSECURE="no"
-
-# Scheduling / timezone
-ENV SCHEDULE=""
-ENV TZ="UTC"
+ENV MINIO_URL="" \
+    MINIO_ACCESS_KEY="" \
+    MINIO_SECRET_KEY="" \
+    AWS_ACCESS_KEY_ID="" \
+    AWS_SECRET_ACCESS_KEY="" \
+    AWS_REGION="ap-southeast-2" \
+    AWS_S3_ENDPOINT="" \
+    DEST_BUCKET="" \
+    DEST_PREFIX="" \
+    BUCKETS="" \
+    REMOVE="yes" \
+    DRY_RUN="no" \
+    ALLOW_INSECURE="no" \
+    SCHEDULE="" \
+    TZ="UTC"
 
 # Scripts
 ADD run.sh /run.sh

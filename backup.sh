@@ -4,6 +4,7 @@ set -euo pipefail
 log(){ printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die(){ echo "ERROR: $*" >&2; exit 1; }
 
+# --- Required configuration ---
 : "${MINIO_URL:?Set MINIO_URL (e.g. http://minio:9000)}"
 : "${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY}"
 : "${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY}"
@@ -11,27 +12,36 @@ die(){ echo "ERROR: $*" >&2; exit 1; }
 : "${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID}"
 : "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY}"
 : "${AWS_REGION:?Set AWS_REGION (e.g. ap-southeast-2)}"
-: "${DEST_BUCKET:?Set DEST_BUCKET}"
+: "${DEST_BUCKET:?Set DEST_BUCKET (single S3 bucket to hold backups)}"
 
 AWS_ENDPOINT="${AWS_S3_ENDPOINT:-https://s3.${AWS_REGION}.amazonaws.com}"
 DEST_PREFIX="${DEST_PREFIX:-}"
 REMOVE="${REMOVE:-yes}"
 DRY_RUN="${DRY_RUN:-no}"
-MC_INSECURE="${MC_INSECURE:-no}"
+
+# Use ALLOW_INSECURE to decide if we pass --insecure to mc
+ALLOW_INSECURE="${ALLOW_INSECURE:-no}"
+
+# Optional explicit bucket allow-list: space/newline-separated (otherwise auto-list all)
 BUCKETS_IN="${BUCKETS:-}"
 
 MC="mc"
 INSECURE_FLAG=""
-case "${MC_INSECURE,,}" in yes|true|1) INSECURE_FLAG="--insecure" ;; esac
+case "${ALLOW_INSECURE,,}" in yes|true|1) INSECURE_FLAG="--insecure" ;; esac
 
+# --- Aliases ---
 $MC $INSECURE_FLAG alias set src "$MINIO_URL" "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" >/dev/null
 $MC $INSECURE_FLAG alias set dst "$AWS_ENDPOINT" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" >/dev/null
+
+# Ensure destination bucket exists (single bucket)
 $MC $INSECURE_FLAG mb --ignore-existing "dst/${DEST_BUCKET}" || true
 
+# Mirror flags
 MIRROR_FLAGS=(--overwrite)
 case "${REMOVE,,}" in yes|true|1) MIRROR_FLAGS+=("--remove") ;; esac
 case "${DRY_RUN,,}" in yes|true|1) MIRROR_FLAGS+=("--dry-run") ;; esac
 
+# Gather bucket list
 if [ -n "$BUCKETS_IN" ]; then
   mapfile -t buckets < <(printf '%s\n' "$BUCKETS_IN" | tr ' ' '\n' | sed '/^$/d')
 else
@@ -43,6 +53,7 @@ if [ "${#buckets[@]}" -eq 0 ]; then
   exit 0
 fi
 
+# Sync each bucket to s3://DEST_BUCKET[/DEST_PREFIX]/<bucket>/
 rc=0
 for b in "${buckets[@]}"; do
   dest="dst/${DEST_BUCKET}"
