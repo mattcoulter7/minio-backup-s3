@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   minio:
     image: minio/minio:latest
@@ -20,27 +22,20 @@ services:
     environment:
       TZ: "Australia/Melbourne"
 
-      # Source MinIO
+      # MinIO source
       MINIO_URL: http://minio:9000
       MINIO_ACCESS_KEY: minio
       MINIO_SECRET_KEY: miniosecret
-      ALLOW_INSECURE: "yes"         # HTTP MinIO in this compose
+      ALLOW_INSECURE: "yes"               # HTTP MinIO in this compose
 
-      # Destination AWS S3
+      # AWS destination (use a bucket you OWN or pick a globally unique name)
       AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
       AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
       AWS_REGION: ap-southeast-2
-
-      # Mode A: single S3 bucket + per-bucket prefixes
-      DEST_MODE: "prefix"
-      DEST_BUCKET: "offsite-backups"
-      DEST_PREFIX: "minio"
-
+      DEST_BUCKET: matt-home-server
+      DEST_PREFIX: minio
       REMOVE: "yes"
       DRY_RUN: "no"
 
-      # Every minute for demo
+      # Example schedule (every minute). Use "@every 1h" or a cron spec.
       SCHEDULE: "* * * * *"
-
-      # Optional: restrict which MinIO buckets to sync
-      # BUCKETS: "audiobookshelf jellyfin"

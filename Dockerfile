@@ -15,17 +15,14 @@ RUN apk add --no-cache bash curl ca-certificates tzdata aws-cli \
 
 COPY --from=build /out/go-cron /usr/local/bin/go-cron
 
-# Defaults (override at runtime)
 ENV MINIO_URL="" \
     MINIO_ACCESS_KEY="" \
     MINIO_SECRET_KEY="" \
     AWS_ACCESS_KEY_ID="" \
     AWS_SECRET_ACCESS_KEY="" \
     AWS_REGION="ap-southeast-2" \
-    DEST_MODE="prefix" \
     DEST_BUCKET="" \
     DEST_PREFIX="" \
-    DEST_BUCKET_TEMPLATE="" \
     BUCKETS="" \
     REMOVE="yes" \
     DRY_RUN="no" \
