@@ -9,23 +9,23 @@ RUN go mod init local/cron \
 
 # --- runtime ---
 FROM alpine:3.22
-
-RUN apk add --no-cache bash curl ca-certificates tzdata \
+RUN apk add --no-cache bash curl ca-certificates tzdata aws-cli \
  && curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc \
  && chmod +x /usr/local/bin/mc
 
 COPY --from=build /out/go-cron /usr/local/bin/go-cron
 
-# Env defaults (override at runtime)
+# Defaults (override at runtime)
 ENV MINIO_URL="" \
     MINIO_ACCESS_KEY="" \
     MINIO_SECRET_KEY="" \
     AWS_ACCESS_KEY_ID="" \
     AWS_SECRET_ACCESS_KEY="" \
     AWS_REGION="ap-southeast-2" \
-    AWS_S3_ENDPOINT="" \
+    DEST_MODE="prefix" \
     DEST_BUCKET="" \
     DEST_PREFIX="" \
+    DEST_BUCKET_TEMPLATE="" \
     BUCKETS="" \
     REMOVE="yes" \
     DRY_RUN="no" \
@@ -33,10 +33,8 @@ ENV MINIO_URL="" \
     SCHEDULE="" \
     TZ="UTC"
 
-# Scripts
 ADD run.sh /run.sh
 ADD backup.sh /backup.sh
-RUN sed -i 's/\r$//' /run.sh /backup.sh \
- && chmod +x /run.sh /backup.sh
+RUN sed -i 's/\r$//' /run.sh /backup.sh && chmod +x /run.sh /backup.sh
 
 CMD ["sh", "/run.sh"]
