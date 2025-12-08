@@ -1,5 +1,5 @@
 # --- build go-cron ---
-FROM alpine:3.22 AS build
+FROM alpine:3.23 AS build
 WORKDIR /src
 RUN apk add --no-cache go
 COPY main.go .
@@ -8,7 +8,7 @@ RUN go mod init local/cron \
  && go build -o /out/go-cron main.go
 
 # --- runtime ---
-FROM alpine:3.22
+FROM alpine:3.23
 RUN apk add --no-cache bash curl ca-certificates tzdata aws-cli \
  && curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc \
  && chmod +x /usr/local/bin/mc
