@@ -1,298 +1,271 @@
-# minio-backup-s3
+# MinIO → S3-Compatible Backup (rclone + supercronic)
 
-Mirror **all MinIO buckets** to **one S3 bucket**, under per‑bucket prefixes.
+This project backs up **all buckets** (or a selected subset) from a **source S3-compatible store** (e.g. MinIO) into a **destination S3-compatible store** (AWS S3, Cloudflare R2, Wasabi, Backblaze B2 S3, DigitalOcean Spaces, IDrive e2, another MinIO, etc.).
 
-* **Upsert** destination bucket: creates it if missing (in `AWS_REGION`), otherwise uses the existing bucket.
-* **Region‑aware:** automatically binds `mc` to the bucket’s **correct regional endpoint** (no 301 redirects).
-* **Overwrite by default:** uses `mc mirror --overwrite` (and optionally `--remove` to delete objects not present in source).
-* **Simple scheduling:** run **once** or **periodically** using `SCHEDULE` (robfig/cron via the tiny `go-cron` runner built into the image).
+It uses:
+- **rclone** for S3-to-S3 copy/sync
+- **supercronic** for scheduling (standard cron syntax)
 
-```
-s3://<DEST_BUCKET>/<DEST_PREFIX>/<minio-bucket-name>/...
-```
-
-> ⚠️ **Bucket ownership**: If `DEST_BUCKET` exists but you **don’t** own it (global name collision), the run fails with a clear error. Use a bucket you own or pick a globally unique name.
-
----
-
-## Requirements
-
-* A running **MinIO** server you can reach over HTTP/HTTPS.
-* An AWS user/role with S3 permissions:
-
-  * `s3:HeadBucket`, `s3:GetBucketLocation`, `s3:GetBucketAcl`
-  * `s3:CreateBucket`
-  * `s3:ListBucket`, `s3:PutObject`, `s3:DeleteObject` (delete only if you enable `REMOVE=yes`)
-
----
-
-## Environment variables
-
-| Variable                | Required | Default          | Notes                                                                           |      |                                          |
-| ----------------------- | -------- | ---------------- | ------------------------------------------------------------------------------- | ---- | ---------------------------------------- |
-| `MINIO_URL`             | ✅        | —                | e.g., `http://minio:9000`                                                       |      |                                          |
-| `MINIO_ACCESS_KEY`      | ✅        | —                | MinIO access key                                                                |      |                                          |
-| `MINIO_SECRET_KEY`      | ✅        | —                | MinIO secret key                                                                |      |                                          |
-| `AWS_ACCESS_KEY_ID`     | ✅        | —                | AWS access key                                                                  |      |                                          |
-| `AWS_SECRET_ACCESS_KEY` | ✅        | —                | AWS secret key                                                                  |      |                                          |
-| `AWS_REGION`            | ✅        | `ap-southeast-2` | Used to create buckets when missing                                             |      |                                          |
-| `DEST_BUCKET`           | ✅        | —                | S3 bucket **you own** (or new unique name)                                      |      |                                          |
-| `DEST_PREFIX`           |          | *(empty)*        | Optional prefix inside `DEST_BUCKET`                                            |      |                                          |
-| `BUCKETS`               |          | *(all)*          | Space/newline list to restrict MinIO buckets (e.g. `"jellyfin navidrome"`)      |      |                                          |
-| `REMOVE`                |          | `yes`            | \`yes                                                                           | true | 1\` to delete objects on S3 not in MinIO |
-| `DRY_RUN`               |          | `no`             | \`yes                                                                           | true | 1\` to preview actions only              |
-| `ALLOW_INSECURE`        |          | `no`             | \`yes                                                                           | true | 1\` if MinIO is HTTP or self‑signed TLS  |
-| `SCHEDULE`              |          | *(empty)*        | Cron string (e.g. `0 * * * *`, `0 2 * * *`). If **empty**, runs once and exits. |      |                                          |
-| `TZ`                    |          | `UTC`            | For timestamped logs & cron timing; set e.g. `Australia/Melbourne`              |      |                                          |
+You get two scripts:
+- `backup.sh` — runs **one backup execution** and exits
+- `run.sh` — runs `backup.sh` on a **cron schedule** (default container entrypoint)
 
 ---
 
 ## How it works
 
-1. **Resolve/ensure** the destination bucket:
+For each source bucket:
 
-   * If it exists and you own it → detect its **region**.
-   * If missing → create it in `AWS_REGION`.
-   * If the name is taken by another account → **fail clearly**.
-2. Bind an `mc` alias to the bucket’s **regional endpoint** (e.g., `https://s3.ap-southeast-2.amazonaws.com`).
-3. **List MinIO buckets**, optionally filtered by `BUCKETS`.
-4. For each, run:
+- Source: `src:<bucket>`
+- Destination: `dst:<DEST_BUCKET>/<DEST_PREFIX>/<bucket>`
 
-   ```
-   mc mirror --overwrite [--remove] src/<bucket> dst/<DEST_BUCKET>/<DEST_PREFIX>/<bucket>
-   ```
+Example:
+- `src:bucket-1` → `dst:my-backups/minio/bucket-1`
+
+### Copy vs Sync (deletes)
+- `REMOVE=no` → `rclone copy` (does **not** delete anything on destination)
+- `REMOVE=yes` → `rclone sync` (destination becomes a mirror; **deletes extra** objects)
 
 ---
 
-## Quick start (Docker Compose)
+## Quick Start (Docker / Compose)
 
-```yaml
-version: "3.9"
-services:
-  minio:
-    image: minio/minio:latest
-    command: server --address :9000 --console-address :9001 /data
-    environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: miniosecret
-    ports: ["9000:9000", "9001:9001"]
-    volumes:
-      - ./data:/data
+1) Create `.env` from the template:
 
-  minio-backup-s3:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    depends_on: [minio]
-    environment:
-      TZ: "Australia/Melbourne"
+```bash
+cp template.env .env
+````
 
-      MINIO_URL: http://minio:9000
-      MINIO_ACCESS_KEY: minio
-      MINIO_SECRET_KEY: miniosecret
-      ALLOW_INSECURE: "yes"
+2. Fill in `.env` values for source + destination.
 
-      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID}"
-      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY}"
-      AWS_REGION: ap-southeast-2
+3. Run scheduled backups (default):
 
-      DEST_BUCKET: your-bucket
-      DEST_PREFIX: minio
-      REMOVE: "yes"
-      DRY_RUN: "no"
-
-      # Every hour:
-      SCHEDULE: "0 * * * *"
+```bash
+docker compose up -d --build
 ```
 
-**Run once and exit:** remove `SCHEDULE` (or set it empty).
-**Dry run:** set `DRY_RUN=yes` to see the plan, no writes.
+4. Run a one-shot backup:
+
+```bash
+docker compose run --rm minio-backup-s3 backup
+```
 
 ---
 
-## Kubernetes
+## Cloudflare R2 notes (common 403 cause)
 
-You can run this two ways:
+R2’s S3 API uses **Access Key ID** + **Secret Access Key** and the **account endpoint**:
 
-### A) **Self‑scheduled Deployment** (container handles `SCHEDULE`)
+* `DEST_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com`
+* `DEST_PROVIDER=Cloudflare`
+* `DEST_REGION=auto`
+* `DEST_FORCE_PATH_STYLE=true`
 
-Use this when you prefer the container to do its own cron.
+Do **not** use your Cloudflare API token as the S3 secret.
+
+---
+
+## Environment Variables
+
+> All variables are read from the container environment (recommended via `.env` / Kubernetes Secret).
+
+| Variable                | Required | Default             | Description                                                                                                           |
+| ----------------------- | -------: | ------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `SRC_ENDPOINT`          |        ✅ | –                   | Source S3 endpoint URL (e.g. `http://minio:9000`, `https://s3.ap-southeast-2.amazonaws.com`)                          |
+| `SRC_ACCESS_KEY`        |        ✅ | –                   | Source S3 Access Key ID                                                                                               |
+| `SRC_SECRET_KEY`        |        ✅ | –                   | Source S3 Secret Access Key                                                                                           |
+| `SRC_PROVIDER`          |        ✅ | –                   | rclone S3 provider string (e.g. `Minio`, `AWS`, `Cloudflare`, `Other`)                                                |
+| `SRC_REGION`            |          | `us-east-1`         | Source region (MinIO often uses `us-east-1`)                                                                          |
+| `SRC_FORCE_PATH_STYLE`  |          | `true`              | Force path-style addressing for source (`true/false`). Often needed for non-AWS S3 endpoints.                         |
+| `SRC_INSECURE_TLS`      |          | `false`             | Skip TLS certificate verification for source (`true/false`). Use only for self-signed HTTPS.                          |
+| `SRC_BUCKETS`           |          | empty               | Optional space/newline list of source buckets to sync. If empty, buckets are auto-discovered using `rclone lsd src:`. |
+| `DEST_ENDPOINT`         |        ✅ | –                   | Destination S3 endpoint URL (e.g. AWS regional endpoint, R2 account endpoint, Wasabi endpoint)                        |
+| `DEST_ACCESS_KEY`       |        ✅ | –                   | Destination S3 Access Key ID                                                                                          |
+| `DEST_SECRET_KEY`       |        ✅ | –                   | Destination S3 Secret Access Key                                                                                      |
+| `DEST_PROVIDER`         |        ✅ | –                   | rclone S3 provider string (e.g. `AWS`, `Cloudflare`, `Other`, `Minio`)                                                |
+| `DEST_REGION`           |          | `us-east-1`         | Destination region (R2 commonly `auto`)                                                                               |
+| `DEST_FORCE_PATH_STYLE` |          | `true`              | Force path-style addressing for destination (`true/false`). Often required for non-AWS.                               |
+| `DEST_INSECURE_TLS`     |          | `false`             | Skip TLS certificate verification for destination (`true/false`).                                                     |
+| `DEST_BUCKET`           |        ✅ | –                   | Destination bucket name (this is the “root” bucket you back up into)                                                  |
+| `DEST_PREFIX`           |          | empty               | Optional prefix under `DEST_BUCKET` (e.g. `minio`)                                                                    |
+| `REMOVE`                |          | `yes`               | `yes` → `rclone sync` (delete extras). `no` → `rclone copy` (no deletes).                                             |
+| `DRY_RUN`               |          | `no`                | `yes` to run with `--dry-run` (no changes made)                                                                       |
+| `TRANSFERS`             |          | `16`                | rclone parallel transfers                                                                                             |
+| `CHECKERS`              |          | `16`                | rclone parallel checkers (listing/checking)                                                                           |
+| `SCHEDULE`              |          | `0 * * * *`         | Cron schedule (5-field standard cron). Example hourly: `0 * * * *`                                                    |
+| `TZ`                    |          | (container default) | Timezone for logs + cron interpretation (e.g. `Australia/Melbourne`)                                                  |
+
+---
+
+## Provider Configuration Examples
+
+### AWS S3 (destination)
+
+```env
+DEST_PROVIDER=AWS
+DEST_ENDPOINT=https://s3.ap-southeast-2.amazonaws.com
+DEST_REGION=ap-southeast-2
+DEST_FORCE_PATH_STYLE=false
+```
+
+### Cloudflare R2 (destination)
+
+```env
+DEST_PROVIDER=Cloudflare
+DEST_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com
+DEST_REGION=auto
+DEST_FORCE_PATH_STYLE=true
+```
+
+### DigitalOcean Spaces (destination)
+
+```env
+DEST_PROVIDER=Other
+DEST_ENDPOINT=https://sfo3.digitaloceanspaces.com
+DEST_REGION=sfo3
+DEST_FORCE_PATH_STYLE=true
+```
+
+---
+
+## Kubernetes Example
+
+This example runs as a **CronJob** once per hour and stores configuration in a Secret.
+
+> Note: Replace image name/tag with your built image. If you push to a registry, update `image:` accordingly.
 
 ```yaml
 apiVersion: v1
-kind: Namespace
+kind: Secret
 metadata:
-  name: backup
+  name: minio-credentials
+type: Opaque
+stringData:
+  SRC_ACCESS_KEY: "minio"
+  SRC_SECRET_KEY: "miniosecret"
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: s3-credentials
-  namespace: backup
+  name: cloudflare-r2-credentials
 type: Opaque
 stringData:
-  AWS_ACCESS_KEY_ID: "<your-aws-key>"
-  AWS_SECRET_ACCESS_KEY: "<your-aws-secret>"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: minio-backup-config
-  namespace: backup
-data:
-  TZ: "Australia/Melbourne"
-  MINIO_URL: "http://minio.minio.svc.cluster.local:9000"
-  MINIO_ACCESS_KEY: "<minio-access>"
-  MINIO_SECRET_KEY: "<minio-secret>"
-  ALLOW_INSECURE: "yes"                 # if MinIO uses HTTP/self-signed
-  AWS_REGION: "ap-southeast-2"
-  DEST_BUCKET: "your-bucket"
-  DEST_PREFIX: "minio"
-  REMOVE: "yes"
-  DRY_RUN: "no"
-  SCHEDULE: "0 2 * * *"                 # run daily at 02:00 local time
+  DEST_ACCESS_KEY: "<dest-access-key-id>"
+  DEST_SECRET_KEY: "<dest-secret-access-key>"
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: minio-backup-s3
-  namespace: backup
 spec:
   replicas: 1
   selector:
-    matchLabels: { app: minio-backup-s3 }
+    matchLabels:
+      app: minio-backup-s3
   template:
     metadata:
-      labels: { app: minio-backup-s3 }
+      labels:
+        app: minio-backup-s3
     spec:
       containers:
         - name: minio-backup-s3
-          image: your-registry/minio-backup-s3:latest
+          image: mattcoulter7/minio-backup-s3:latest
           imagePullPolicy: IfNotPresent
-          envFrom:
-            - configMapRef: { name: minio-backup-config }
-            - secretRef:    { name: s3-credentials }
-          resources:
-            requests: { cpu: "50m", memory: "64Mi" }
-            limits:   { cpu: "500m", memory: "512Mi" }
-```
+          env:
+            # --- General ---
+            - name: TZ
+              value: "Australia/Melbourne"
 
-> Adjust the `MINIO_URL` to point at your MinIO Service (or external address).
-> If your k8s uses real TLS for MinIO, set `ALLOW_INSECURE` to `"no"`.
+            # Standard cron (5-field). Hourly:
+            - name: SCHEDULE
+              value: "0 * * * *"
 
----
+            # --- Source (MinIO example) ---
+            - name: SRC_PROVIDER
+              value: "Minio"
+            - name: SRC_ENDPOINT
+              value: "http://minio-service.default.svc.cluster.local:9000"
+            - name: SRC_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: SRC_ACCESS_KEY
+            - name: SRC_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: SRC_SECRET_KEY
+            - name: SRC_REGION
+              value: "us-east-1"
+            - name: SRC_FORCE_PATH_STYLE
+              value: "true"
+            - name: SRC_INSECURE_TLS
+              value: "false"
+            # Optional: restrict buckets
+            # - name: SRC_BUCKETS
+            #   value: "bucket-1 bucket-2"
 
-### B) **Native CronJob** (Kubernetes schedules; container runs once)
+            # --- Destination (Cloudflare R2 example) ---
+            - name: DEST_PROVIDER
+              value: "Cloudflare"
+            - name: DEST_ENDPOINT
+              value: "https://<accountid>.r2.cloudflarestorage.com"
+            - name: DEST_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflare-r2-credentials
+                  key: DEST_ACCESS_KEY
+            - name: DEST_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cloudflare-r2-credentials
+                  key: DEST_SECRET_KEY
+            - name: DEST_REGION
+              value: "auto"
+            - name: DEST_FORCE_PATH_STYLE
+              value: "true"
+            - name: DEST_INSECURE_TLS
+              value: "false"
 
-Use this when you want **Kubernetes** to control the schedule. In this mode, **do not set `SCHEDULE`** in env; the container runs once and exits.
+            # --- Destination path ---
+            - name: DEST_BUCKET
+              value: "your-bucket"
+            - name: DEST_PREFIX
+              value: "minio"
 
-```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: minio-backup-s3
-  namespace: backup
-spec:
-  schedule: "0 * * * *"   # hourly
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
-  jobTemplate:
-    spec:
-      backoffLimit: 1
-      template:
-        spec:
-          restartPolicy: Never
-          containers:
-            - name: minio-backup-s3
-              image: your-registry/minio-backup-s3:latest
-              imagePullPolicy: IfNotPresent
-              env:
-                - name: TZ
-                  value: "Australia/Melbourne"
-                - name: MINIO_URL
-                  value: "http://minio.minio.svc.cluster.local:9000"
-                - name: MINIO_ACCESS_KEY
-                  valueFrom: { secretKeyRef: { name: minio-keys, key: access } }
-                - name: MINIO_SECRET_KEY
-                  valueFrom: { secretKeyRef: { name: minio-keys, key: secret } }
-                - name: ALLOW_INSECURE
-                  value: "yes"
-
-                - name: AWS_REGION
-                  value: "ap-southeast-2"
-                - name: AWS_ACCESS_KEY_ID
-                  valueFrom: { secretKeyRef: { name: s3-credentials, key: AWS_ACCESS_KEY_ID } }
-                - name: AWS_SECRET_ACCESS_KEY
-                  valueFrom: { secretKeyRef: { name: s3-credentials, key: AWS_SECRET_ACCESS_KEY } }
-
-                - name: DEST_BUCKET
-                  value: "your-bucket"
-                - name: DEST_PREFIX
-                  value: "minio"
-                - name: REMOVE
-                  value: "yes"
-                - name: DRY_RUN
-                  value: "no"
-              # Do NOT set SCHEDULE here; CronJob controls timing.
-```
-
-> Create `minio-keys` and `s3-credentials` Secrets in the same namespace.
-> This job runs once per schedule and exits cleanly.
-
----
-
-## Logs you’ll see
-
-* Bucket creation/selection:
-
-  * `Using existing bucket s3://... (region ap-southeast-2)` **or**
-  * `Creating bucket s3://... in region ap-southeast-2`
-* Alias binding:
-
-  * `S3 alias 'dst' -> https://s3.ap-southeast-2.amazonaws.com`
-* Mirroring per source bucket:
-
-  * `Mirroring: src/<bucket>  -->  dst/<DEST_BUCKET>/<DEST_PREFIX>/<bucket>`
-
-If `DEST_BUCKET` exists but you don’t own it:
-
-```
-ERROR: S3 bucket 's3://...' is NOT available (owned by another account). Choose a bucket you own or a unique name.
+            # --- Behaviour ---
+            - name: REMOVE
+              value: "yes"
+            - name: DRY_RUN
+              value: "no"
+            - name: TRANSFERS
+              value: "16"
+            - name: CHECKERS
+              value: "16"
 ```
 
 ---
 
-## Tips & troubleshooting
+## Troubleshooting
 
-* **301 Moved Permanently**: The script binds `mc` to the **actual** bucket region; if you still see 301s, ensure the image you’re running is the latest build and `DEST_BUCKET` is owned by your account.
-* **Dry run** first:
+### Supercronic “bad crontab line”
 
-  ```
-  DRY_RUN=yes REMOVE=no
-  ```
-* **Restrict buckets**:
+Use standard cron format (5 fields), e.g.:
 
-  ```
-  BUCKETS="audiobookshelf jellyfin"
-  ```
-* **Deletes**: `REMOVE=yes` enables deletion on S3 for keys not present in MinIO. Omit or set to `no` to keep extra objects.
+* Hourly: `0 * * * *`
+* Every 15 minutes: `*/15 * * * *`
+
+### 403 Forbidden (R2 and other providers)
+
+Most common causes:
+
+* Wrong endpoint (must be the provider’s S3 endpoint, not a console URL)
+* Wrong credentials (R2 requires S3 Access Key + Secret Key)
+* Token/keys don’t have permission to the bucket
+* Path-style needed → set `DEST_FORCE_PATH_STYLE=true`
 
 ---
 
-## One‑off local run
+## Licence
 
-```bash
-docker run --rm \
-  -e MINIO_URL=http://localhost:9000 \
-  -e MINIO_ACCESS_KEY=minio \
-  -e MINIO_SECRET_KEY=miniosecret \
-  -e ALLOW_INSECURE=yes \
-  -e AWS_ACCESS_KEY_ID=... \
-  -e AWS_SECRET_ACCESS_KEY=... \
-  -e AWS_REGION=ap-southeast-2 \
-  -e DEST_BUCKET=your-bucket \
-  -e DEST_PREFIX=minio \
-  -e REMOVE=yes \
-  -e DRY_RUN=no \
-  mattcoulter7/minio-backup-s3:latest
-```
+MIT.
