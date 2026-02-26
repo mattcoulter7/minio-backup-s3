@@ -1,0 +1,20 @@
+services:
+  minio:
+    image: minio/minio:latest
+    command: server --address :9000 --console-address :9001 /data
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    ports: ["9000:9000", "9001:9001"]
+    volumes:
+      - ./test/data:/data
+
+  minio-backup-s3:
+    build: .
+    depends_on: [minio]
+    # entrypoint: ["/app/backup.sh"]
+    env_file:
+      - ./.env
+    environment:
+      TZ: "Australia/Melbourne"
+    restart: unless-stopped

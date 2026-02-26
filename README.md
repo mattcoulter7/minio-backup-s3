@@ -42,7 +42,7 @@ s3://<DEST_BUCKET>/<DEST_PREFIX>/<minio-bucket-name>/...
 | `REMOVE`                |          | `yes`            | \`yes                                                                           | true | 1\` to delete objects on S3 not in MinIO |
 | `DRY_RUN`               |          | `no`             | \`yes                                                                           | true | 1\` to preview actions only              |
 | `ALLOW_INSECURE`        |          | `no`             | \`yes                                                                           | true | 1\` if MinIO is HTTP or self‑signed TLS  |
-| `SCHEDULE`              |          | *(empty)*        | Cron string (e.g. `@every 1h`, `0 2 * * *`). If **empty**, runs once and exits. |      |                                          |
+| `SCHEDULE`              |          | *(empty)*        | Cron string (e.g. `0 * * * *`, `0 2 * * *`). If **empty**, runs once and exits. |      |                                          |
 | `TZ`                    |          | `UTC`            | For timestamped logs & cron timing; set e.g. `Australia/Melbourne`              |      |                                          |
 
 ---
@@ -102,7 +102,7 @@ services:
       DRY_RUN: "no"
 
       # Every hour:
-      SCHEDULE: "@every 1h"
+      SCHEDULE: "0 * * * *"
 ```
 
 **Run once and exit:** remove `SCHEDULE` (or set it empty).

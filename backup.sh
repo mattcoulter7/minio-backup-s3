@@ -4,125 +4,132 @@ set -euo pipefail
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { echo "[$(ts)] $*"; }
 fail() { echo "[$(ts)] ERROR: $*" >&2; exit 1; }
+lower() { tr '[:upper:]' '[:lower:]'; }
+is_truthy() { case "$(echo "${1:-}" | lower)" in yes|true|1) return 0 ;; *) return 1 ;; esac; }
 
-# -------- REQUIRED ENV --------
-: "${MINIO_URL:?Set MINIO_URL (e.g. http://minio:9000)}"
-: "${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY}"
-: "${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY}"
+# ---------- REQUIRED ENV ----------
+: "${SRC_ENDPOINT:?Set SRC_ENDPOINT (e.g. http://minio:9000)}"
+: "${SRC_ACCESS_KEY:?Set SRC_ACCESS_KEY}"
+: "${SRC_SECRET_KEY:?Set SRC_SECRET_KEY}"
+: "${SRC_PROVIDER:?Set SRC_PROVIDER (Minio|AWS|Other|Cloudflare)}"
 
-: "${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID}"
-: "${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY}"
-: "${AWS_REGION:?Set AWS_REGION (e.g. ap-southeast-2)}"
+: "${DEST_ENDPOINT:?Set DEST_ENDPOINT (e.g. https://<accountid>.r2.cloudflarestorage.com)}"
+: "${DEST_ACCESS_KEY:?Set DEST_ACCESS_KEY}"
+: "${DEST_SECRET_KEY:?Set DEST_SECRET_KEY}"
+: "${DEST_PROVIDER:?Set DEST_PROVIDER (AWS|Other|Cloudflare|Minio)}"
 
-: "${DEST_BUCKET:?Set DEST_BUCKET (S3 bucket you OWN or a unique name to create)}"
+: "${DEST_BUCKET:?Set DEST_BUCKET}"
 
-# -------- OPTIONAL ENV --------
-DEST_PREFIX="${DEST_PREFIX:-}"     # extra prefix inside DEST_BUCKET
-REMOVE="${REMOVE:-yes}"            # yes|true|1 to delete dest objects not in source
-DRY_RUN="${DRY_RUN:-no}"           # yes|true|1 to preview only
-ALLOW_INSECURE="${ALLOW_INSECURE:-no}"  # yes|true|1 if MinIO is HTTP/self-signed
-BUCKETS="${BUCKETS:-}"             # optional space/newline list to restrict which MinIO buckets
+# ---------- OPTIONAL ENV ----------
+SRC_REGION="${SRC_REGION:-us-east-1}"
+DEST_REGION="${DEST_REGION:-us-east-1}"
 
-export AWS_DEFAULT_REGION="${AWS_REGION}"
+SRC_FORCE_PATH_STYLE="${SRC_FORCE_PATH_STYLE:-true}"
+DEST_FORCE_PATH_STYLE="${DEST_FORCE_PATH_STYLE:-true}"
 
-# -------- mc aliases --------
-INSECURE_FLAG=""
-case "$(echo "${ALLOW_INSECURE}" | tr '[:upper:]' '[:lower:]')" in
-  yes|true|1) INSECURE_FLAG="--insecure" ;;
-esac
+SRC_INSECURE_TLS="${SRC_INSECURE_TLS:-false}"
+DEST_INSECURE_TLS="${DEST_INSECURE_TLS:-false}"
 
-mc ${INSECURE_FLAG} alias set src "${MINIO_URL}" "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}" >/dev/null
+SRC_BUCKETS="${SRC_BUCKETS:-}"   # space/newline separated list; if empty => discover
+DEST_PREFIX="${DEST_PREFIX:-}"   # prefix inside DEST_BUCKET
 
-# -------- helpers --------
-bucket_region() {
-  # prints region if you OWN/access the bucket, empty otherwise
-  if aws s3api head-bucket --bucket "$1" >/dev/null 2>&1; then
-    loc="$(aws s3api get-bucket-location --bucket "$1" --query 'LocationConstraint' --output text 2>/dev/null || echo 'None')"
-    case "$loc" in None|null|""|AWS_GLOBAL) echo "us-east-1" ;; *) echo "$loc" ;; esac
-  else
-    echo ""
-  fi
-}
+REMOVE="${REMOVE:-yes}"          # yes => sync (delete extras), no => copy
+DRY_RUN="${DRY_RUN:-no}"         # yes => --dry-run
 
-create_bucket_if_missing() {
-  local b="$1" r="$2"
-  if aws s3api head-bucket --bucket "$b" >/dev/null 2>&1; then
+TRANSFERS="${TRANSFERS:-16}"
+CHECKERS="${CHECKERS:-16}"
+
+# ---------- rclone config ----------
+mkdir -p /config
+export RCLONE_CONFIG=/config/rclone.conf
+
+cat >"$RCLONE_CONFIG" <<EOF
+[src]
+type = s3
+provider = ${SRC_PROVIDER}
+access_key_id = ${SRC_ACCESS_KEY}
+secret_access_key = ${SRC_SECRET_KEY}
+endpoint = ${SRC_ENDPOINT}
+region = ${SRC_REGION}
+force_path_style = ${SRC_FORCE_PATH_STYLE}
+
+[dst]
+type = s3
+provider = ${DEST_PROVIDER}
+access_key_id = ${DEST_ACCESS_KEY}
+secret_access_key = ${DEST_SECRET_KEY}
+endpoint = ${DEST_ENDPOINT}
+region = ${DEST_REGION}
+force_path_style = ${DEST_FORCE_PATH_STYLE}
+EOF
+
+# TLS flags (simple + global)
+RCLONE_TLS_FLAGS=()
+is_truthy "${SRC_INSECURE_TLS}" && RCLONE_TLS_FLAGS+=(--no-check-certificate)
+is_truthy "${DEST_INSECURE_TLS}" && RCLONE_TLS_FLAGS+=(--no-check-certificate)
+
+# Determine which buckets to sync
+get_src_buckets() {
+  if [ -n "${SRC_BUCKETS}" ]; then
+    printf '%s\n' "${SRC_BUCKETS}" | tr ' ' '\n' | sed '/^$/d'
     return 0
   fi
-  log "Creating bucket s3://${b} in region ${r} (if available)…"
-  if [ "$r" = "us-east-1" ]; then
-    out="$(aws s3api create-bucket --bucket "$b" 2>&1)" || true
-  else
-    out="$(aws s3api create-bucket --bucket "$b" --create-bucket-configuration "LocationConstraint=$r" 2>&1)" || true
-  fi
-  if echo "$out" | grep -q "BucketAlreadyOwnedByYou"; then
-    return 0
-  fi
-  if echo "$out" | grep -q "BucketAlreadyExists"; then
-    # Somebody else owns this name; you can't use it.
-    fail "S3 bucket name 's3://${b}' is NOT available (owned by another account). Choose a bucket you own or a unique name."
-  fi
-  # If create failed with anything else, check again; otherwise surface message.
-  if ! aws s3api head-bucket --bucket "$b" >/dev/null 2>&1; then
-    fail "Failed to create bucket s3://${b}: ${out}"
-  fi
+
+  # list buckets visible on src
+  rclone lsd src: "${RCLONE_TLS_FLAGS[@]}" 2>/dev/null \
+    | awk '{print $NF}' \
+    | sed 's:/*$::' \
+    | grep -v '^\.minio\.sys$' \
+    || true
 }
 
-regional_endpoint() {
-  [ "$1" = "us-east-1" ] && echo "https://s3.amazonaws.com" || echo "https://s3.$1.amazonaws.com"
-}
+mapfile -t buckets < <(get_src_buckets)
 
-# -------- ensure destination bucket & endpoint --------
-dest_region="$(bucket_region "${DEST_BUCKET}")"
-if [ -z "$dest_region" ]; then
-  dest_region="$AWS_REGION"
-  create_bucket_if_missing "${DEST_BUCKET}" "${dest_region}"
-  # after creation, trust configured region
-  log "Using bucket s3://${DEST_BUCKET} (region ${dest_region})"
-else
-  log "Using existing bucket s3://${DEST_BUCKET} (region ${dest_region})"
-fi
-
-dst_ep="$(regional_endpoint "${dest_region}")"
-mc alias set dst "${dst_ep}" "${AWS_ACCESS_KEY_ID}" "${AWS_SECRET_ACCESS_KEY}" >/dev/null
-log "S3 alias 'dst' -> ${dst_ep}"
-
-# Preflight with mc against the correct regional endpoint
-if ! mc ls "dst/${DEST_BUCKET}" >/dev/null 2>&1; then
-  err="$(mc ls "dst/${DEST_BUCKET}" 2>&1 || true)"
-  fail "Cannot access s3://${DEST_BUCKET} via ${dst_ep}. Details: ${err}"
-fi
-
-# -------- list source buckets --------
-if [ -n "$BUCKETS" ]; then
-  # allow space/newline separated list
-  mapfile -t src_buckets < <(printf '%s\n' "$BUCKETS" | tr ' ' '\n' | sed '/^$/d')
-else
-  mapfile -t src_buckets < <(mc ${INSECURE_FLAG} ls src | awk '{print $NF}' | sed 's:/$::' | grep -v '^\.minio\.sys$' || true)
-fi
-
-if [ "${#src_buckets[@]}" -eq 0 ]; then
-  log "No MinIO buckets found. Nothing to do."
+if [ "${#buckets[@]}" -eq 0 ]; then
+  log "No source buckets found (or no access). Nothing to do."
   exit 0
 fi
 
-log "Source buckets: ${src_buckets[*]}"
+# Select mode
+mode="copy"
+verb="Copying"
+extra_flags=()
+if is_truthy "${REMOVE}"; then
+  mode="sync"
+  verb="Syncing (with deletes)"
+fi
+is_truthy "${DRY_RUN}" && extra_flags+=(--dry-run)
 
-# -------- mirror --------
-MIRROR_FLAGS=(--overwrite)
-case "$(echo "$REMOVE" | tr '[:upper:]' '[:lower:]')" in yes|true|1) MIRROR_FLAGS+=("--remove") ;; esac
-case "$(echo "$DRY_RUN" | tr '[:upper:]' '[:lower:]')" in yes|true|1) MIRROR_FLAGS+=("--dry-run") ;; esac
+log "Starting: ${verb} ${#buckets[@]} bucket(s)"
+log "src endpoint: ${SRC_ENDPOINT}"
+log "dst endpoint: ${DEST_ENDPOINT}"
+log "dest bucket:  ${DEST_BUCKET}${DEST_PREFIX:+/${DEST_PREFIX%/}}"
+log "mode: ${mode}  dry_run: ${DRY_RUN}  transfers: ${TRANSFERS}  checkers: ${CHECKERS}"
+
+# Ensure dest bucket exists (best-effort)
+rclone mkdir "dst:${DEST_BUCKET}" "${RCLONE_TLS_FLAGS[@]}" >/dev/null 2>&1 || true
 
 rc=0
-for b in "${src_buckets[@]}"; do
-  dest="dst/${DEST_BUCKET}"
-  [ -n "$DEST_PREFIX" ] && dest="${dest}/${DEST_PREFIX%/}"
-  dest="${dest}/${b}"
-  log "Mirroring: src/${b}  -->  ${dest}"
-  if ! mc ${INSECURE_FLAG} mirror "${MIRROR_FLAGS[@]}" "src/${b}" "${dest}"; then
-    log "Mirror FAILED for bucket: ${b}"
+for b in "${buckets[@]}"; do
+  src_path="src:${b}"
+  dst_path="dst:${DEST_BUCKET}"
+  [ -n "${DEST_PREFIX}" ] && dst_path="${dst_path}/${DEST_PREFIX%/}"
+  dst_path="${dst_path}/${b}"
+
+  log "${verb}: ${src_path} -> ${dst_path}"
+
+  if ! rclone "${mode}" \
+      "${src_path}" "${dst_path}" \
+      --fast-list \
+      --transfers "${TRANSFERS}" \
+      --checkers "${CHECKERS}" \
+      --stats 30s \
+      --stats-one-line \
+      "${RCLONE_TLS_FLAGS[@]}" \
+      "${extra_flags[@]}"; then
+    log "FAILED: bucket ${b}"
     rc=1
   fi
 done
 
-[ $rc -eq 0 ] && log "Sync completed OK." || fail "One or more bucket syncs failed (rc=${rc})."
+[ $rc -eq 0 ] && log "Backup completed OK." || fail "One or more bucket syncs failed."
